@@ -1,20 +1,25 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <assert.h>
-#include "github.com/lobaro/util-ringbuf/drv_ringbuf.h"
 #include "slip.h"
+
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(slip, LOG_LEVEL_INF);
 
 void init_slip_buffer(slipBuffer_t* slip_buf, uint8_t* buf, int size) {
 	slip_buf->packetCnt = 0;
 	slip_buf->last = SLIP_END;
-	drv_rbuf_init(&(slip_buf->ringBuf), size, char, buf);
+	ring_buf_init(&(slip_buf->ringBuf), size, buf);
 }
 
 // Takes a slip encoded byte from the UART and puts it to the buffer
 void slip_uart_putc(volatile slipBuffer_t* slip_buf, char c) {
-	configASSERT(!isBufferFull(&(slip_buf->ringBuf)));
+	int written = ring_buf_put(&(slip_buf->ringBuf), &c, 1);
+	if (written != 1) {
+		LOG_ERR("Failed to write to slip ring buffer");
+		return;
+	}
 
-	drv_rbuf_write(&(slip_buf->ringBuf), c);
 	if (c == SLIP_END && slip_buf->last != SLIP_END) {
 		// Got END for non empty packet
 		slip_buf->packetCnt++;
@@ -92,15 +97,21 @@ int slip_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len) {
 	while (1) {
 		/* get a character to process
 		 */
-		if (isBufferEmpty(&(buf->ringBuf))) {
-			configASSERT(buf->packetCnt == 0);
+		if (ring_buf_is_empty(&(buf->ringBuf))) {
+			if (buf->packetCnt != 0) {
+				LOG_ERR("Ring buffer is empty but packet count is not zero");
+				return -1;
+			}
 			return received;
 		}
-		//taskENTER_CRITICAL();
-		configASSERT(!isBufferFull(&(buf->ringBuf)));
-		drv_rbuf_read(&(buf->ringBuf), &c);
-		//taskEXIT_CRITICAL();
 
+		if (ring_buf_space_get(&(buf->ringBuf)) == 0) {
+			LOG_ERR("Ring buffer is full");
+			return -1;
+		}
+
+		ring_buf_get(&(buf->ringBuf), (uint8_t*)&c, 1);
+		
 		/* handle bytestuffing if necessary
 		 */
 		switch (c) {
@@ -117,9 +128,7 @@ int slip_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len) {
 			 * turn sent to try to detect line noise.
 			 */
 			if (received) {
-				taskENTER_CRITICAL();
 				buf->packetCnt--;
-				taskEXIT_CRITICAL();
 				return received;
 			}
 			else {
@@ -131,14 +140,18 @@ int slip_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len) {
 			 * what to store in the packet based on that.
 			 */
 		case SLIP_ESC:
-			if (isBufferEmpty(&(buf->ringBuf))) {
-				configASSERT(buf->packetCnt == 0);
+			if (ring_buf_is_empty(&(buf->ringBuf))) {
+				if (buf->packetCnt != 0) {
+					LOG_ERR("Ring buffer is empty but packet count is not zero");
+				return -1;
+			}
 				return received;
 			}
-			//taskENTER_CRITICAL();
-			configASSERT(!isBufferFull(&(buf->ringBuf)));
-			drv_rbuf_read(&(buf->ringBuf), &c);
-			//taskEXIT_CRITICAL();
+			if (ring_buf_space_get(&(buf->ringBuf)) == 0) {
+				LOG_ERR("Ring buffer is full");
+				return -1;
+			}
+			ring_buf_get(&(buf->ringBuf), (uint8_t*)&c, 1);
 
 			/* if "c" is not one of these two, then we
 			 * have a protocol violation.  The best bet

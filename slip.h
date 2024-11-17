@@ -8,10 +8,7 @@
 #ifndef SRC_UTIL_SLIP_SLIP_H_
 #define SRC_UTIL_SLIP_SLIP_H_
 
-#include "github.com/lobaro/util-ringbuf/drv_ringbuf.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "semphr.h"
+#include <zephyr/sys/ring_buffer.h>
 
 /* SLIP special character codes
  */
@@ -27,11 +24,18 @@ typedef enum {
 } slipmuxType;
 
 typedef struct {
-	charRingBuf_t ringBuf;
+	struct ring_buf ringBuf;
 	char last; // last received character.
 	uint8_t packetCnt; // Number of non empty packets in buffer.
 } slipBuffer_t;
 
+/**
+ * @brief 
+ * 
+ * @param slip_buf 
+ * @param buf Ring buffer data area.
+ * @param size Ring buffer size in bytes
+ */
 void init_slip_buffer(slipBuffer_t* slip_buf, uint8_t* buf, int size);
 
 void slip_uart_putc(volatile slipBuffer_t* slip_buf, char c);
@@ -46,8 +50,8 @@ int slip_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len);
 void slip_send_packet(uint8_t *p, int len, void (*send_char)(char c));
 void slip_encode(const uint8_t* p, int len, void (* send_char)(char c));
 
-int slipmux_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len, uint8_t* type);
-void slipmux_send_packet(const uint8_t* p, int len, uint8_t type, void (* send_char)(char c));
-void slipmux_setSemaphores(SemaphoreHandle_t rxSem, SemaphoreHandle_t txSem);
+// int slipmux_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len, uint8_t* type);
+// void slipmux_send_packet(const uint8_t* p, int len, uint8_t type, void (* send_char)(char c));
+// void slipmux_setSemaphores(SemaphoreHandle_t rxSem, SemaphoreHandle_t txSem);
 
 #endif /* SRC_UTIL_SLIP_SLIP_H_ */
