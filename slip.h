@@ -18,18 +18,15 @@
 #define SLIP_ESC_END         ((uint8_t)0334)    /* ESC ESC_END means END data byte */
 #define SLIP_ESC_ESC         ((uint8_t)0335)    /* ESC ESC_ESC means ESC data byte */
 
-typedef enum {
-	SLIPMUX_COAP = 0xA9,
-	SLIPMUX_DIAGNOSTIC = 0x0a,
-	// For IPv4 and IPv6 packets just use SLIP. A SlipMux client will understand it!
-} slipmuxType;
+// Configurations
+
+#define SLIP_READ_PACKETS_MAX_QTY 2
 
 struct slipBuffer{
 	struct ring_buf ringBuf;
-	char last; // last received character.
-	uint8_t packetCnt; // Number of non empty packets in buffer.
-	struct k_sem sem_ring_buffer;
-	struct k_poll_signal* signal_packet_ready;
+	uint8_t last; 						// last received character.
+	struct k_sem ring_buffer_sem;	// Semaphore to protect ring buffer
+	struct k_sem packet_ready_sem; 	// Semaphore that signals number of ready to read packets
 } ;
 
 /**
@@ -39,7 +36,7 @@ struct slipBuffer{
  * @param buf Ring buffer data area.
  * @param size Ring buffer size in bytes
  */
-void init_slip_buffer(struct slipBuffer* slip_buf, uint8_t* buf, int size, struct k_poll_signal* signal);
+int init_slip_buffer(struct slipBuffer* slip_buf, uint8_t* buf, int size);
 
 void slip_uart_putc(struct slipBuffer* slip_buf, char c);
 

@@ -7,39 +7,44 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(slip, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(slip, LOG_LEVEL_INF);
 
-void init_slip_buffer(struct slipBuffer* slip_buf, uint8_t* buf, int size, struct k_poll_signal* signal) {
-	if (NULL == slip_buf) {
-		LOG_ERR("Slip buffer is NULL");
-		return;
+int init_slip_buffer(struct slipBuffer* slip_buf, uint8_t* buf, int size) {
+	if (NULL == slip_buf || NULL == buf) {
+		LOG_ERR("Invalid slip buffer or buffer");
+		return -1;
 	}
 	
-	slip_buf->packetCnt = 0;
 	slip_buf->last = SLIP_END;
 	ring_buf_init(&(slip_buf->ringBuf), size, buf);
 	
-	int err = k_sem_init(&slip_buf->sem_ring_buffer, 1, 1);
+	int err = k_sem_init(&slip_buf->ring_buffer_sem, 1, 1);
 	if (err) {
-		LOG_ERR("Failed to initialize slip semaphore");
+		LOG_ERR("Failed to initialize ring buffer slip semaphore");
+		return -1;
 	}
 
-	if (NULL == signal) {
-		LOG_ERR("Signal is NULL");
-		return;
+	err = k_sem_init(&slip_buf->packet_ready_sem, 0, SLIP_READ_PACKETS_MAX_QTY);
+	if (err) {
+		LOG_ERR("Failed to initialize packet ready slip semaphore");
+		return -1;
 	}
-	slip_buf->signal_packet_ready = signal;
+
+	return 0;
 }
 
 // Takes a slip encoded byte from the UART and puts it to the buffer
 void slip_uart_putc(struct slipBuffer* slip_buf, char c) {
 	
-	// if (0 != k_sem_take(&slip_buf->sem_ring_buffer, K_MSEC(50))) {
-		// return;
-	// }
+	if (0 != k_sem_take(&slip_buf->ring_buffer_sem, K_MSEC(50))) {
+		LOG_DBG("Ring buffer sempahore is not available");
+		return;
+	}
+	LOG_DBG("Ring buffer sempahore taken, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
 
 	int written = ring_buf_put(&(slip_buf->ringBuf), &c, 1);
-	// k_sem_give(&slip_buf->sem_ring_buffer);
+	k_sem_give(&slip_buf->ring_buffer_sem);
+	LOG_DBG("Ring buffer sempahore given, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
 
 	if (written != 1) {
 		LOG_ERR("Failed to write to slip ring buffer");
@@ -48,8 +53,9 @@ void slip_uart_putc(struct slipBuffer* slip_buf, char c) {
 
 	if (c == SLIP_END && slip_buf->last != SLIP_END) {
 		// Got END for non empty packet
-		slip_buf->packetCnt++;
-		k_poll_signal_raise(slip_buf->signal_packet_ready, 0);
+		// slip_buf->packetCnt++;
+		k_sem_give(&slip_buf->packet_ready_sem);
+		LOG_DBG("Give sem, %d", k_sem_count_get(&slip_buf->packet_ready_sem));
 	}
 	slip_buf->last = c;
 }
@@ -112,11 +118,6 @@ int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len) {
 	char c;
 	int received = 0;
 
-	if (slip_buf->packetCnt == 0) {
-		LOG_DBG("105");
-		return 0;
-	}
-
 	memset(p, 0, len);
 
 	/* sit in a loop reading bytes until we put together
@@ -127,18 +128,12 @@ int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len) {
 	while (1) {
 		/* get a character to process
 		 */
-		// if (0 != k_sem_take(&slip_buf->sem_ring_buffer, K_MSEC(50))) {
-		// 	LOG_DBG("104");
-		// 	return -1;
-		// }
-
 		if (ring_buf_is_empty(&(slip_buf->ringBuf))) {
-			if (slip_buf->packetCnt != 0) {
+			if (k_sem_count_get(&slip_buf->packet_ready_sem) != 0) {
 				LOG_ERR("Ring buffer is empty but packet count is not zero");
 				// k_sem_give(&slip_buf->sem_ring_buffer);
 				return -1;
 			}
-			LOG_DBG("101");
 			// k_sem_give(&slip_buf->sem_ring_buffer);
 			return received;
 		}
@@ -149,8 +144,21 @@ int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len) {
 			return -1;
 		}
 
-		ring_buf_get(&(slip_buf->ringBuf), (uint8_t*)&c, 1);
-		
+		if (0 != k_sem_take(&slip_buf->ring_buffer_sem, K_MSEC(50))) {
+			LOG_DBG("Ring buffer sempahore is not available");
+			return -1;
+		}
+
+		uint32_t got_byte_count = ring_buf_get(&(slip_buf->ringBuf), (uint8_t*)&c, 1);
+		if (got_byte_count != 1) {
+			LOG_ERR("Failed to read from slip ring buffer");
+			k_sem_give(&slip_buf->ring_buffer_sem);
+			LOG_DBG("Give ring buffer sem, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
+			return -1;
+		}
+		LOG_DBG("Give ring buffer sem, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
+		k_sem_give(&slip_buf->ring_buffer_sem);
+
 		/* handle bytestuffing if necessary
 		 */
 		switch (c) {
@@ -167,8 +175,8 @@ int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len) {
 				* turn sent to try to detect line noise.
 				*/
 				if (received) {
-					slip_buf->packetCnt--;
-					LOG_DBG("102");
+					k_sem_take(&slip_buf->packet_ready_sem, K_NO_WAIT);
+					LOG_DBG("Take sem, %d", k_sem_count_get(&slip_buf->packet_ready_sem));
 					return received;
 				}
 				else {
@@ -181,18 +189,31 @@ int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len) {
 				*/
 			case SLIP_ESC:
 				if (ring_buf_is_empty(&(slip_buf->ringBuf))) {
-					if (slip_buf->packetCnt != 0) {
+					if (k_sem_count_get(&slip_buf->packet_ready_sem) != 0) {
 						LOG_ERR("Ring buffer is empty but packet count is not zero");
 					return -1;
 				}
-					LOG_DBG("103");
 					return received;
 				}
 				if (ring_buf_space_get(&(slip_buf->ringBuf)) == 0) {
 					LOG_ERR("Ring buffer is full");
 					return -1;
 				}
-				ring_buf_get(&(slip_buf->ringBuf), (uint8_t*)&c, 1);
+				
+				if (0 != k_sem_take(&slip_buf->ring_buffer_sem, K_MSEC(50))) {
+					LOG_DBG("Ring buffer sempahore is not available");
+					return -1;
+				}
+
+				got_byte_count = ring_buf_get(&(slip_buf->ringBuf), (uint8_t*)&c, 1);
+				if (got_byte_count != 1) {
+					LOG_ERR("Failed to read from slip ring buffer");
+					k_sem_give(&slip_buf->ring_buffer_sem);
+					LOG_DBG("Give ring buffer sem, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
+					return -1;
+				}
+				LOG_DBG("Give ring buffer sem, %d", k_sem_count_get(&slip_buf->ring_buffer_sem));
+				k_sem_give(&slip_buf->ring_buffer_sem);
 
 				/* if "c" is not one of these two, then we
 				* have a protocol violation.  The best bet
