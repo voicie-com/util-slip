@@ -9,6 +9,7 @@
 #define SRC_UTIL_SLIP_SLIP_H_
 
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/kernel.h>
 
 /* SLIP special character codes
  */
@@ -23,11 +24,13 @@ typedef enum {
 	// For IPv4 and IPv6 packets just use SLIP. A SlipMux client will understand it!
 } slipmuxType;
 
-typedef struct {
+struct slipBuffer{
 	struct ring_buf ringBuf;
 	char last; // last received character.
 	uint8_t packetCnt; // Number of non empty packets in buffer.
-} slipBuffer_t;
+	struct k_sem sem_ring_buffer;
+	struct k_poll_signal* signal_packet_ready;
+} ;
 
 /**
  * @brief 
@@ -36,9 +39,9 @@ typedef struct {
  * @param buf Ring buffer data area.
  * @param size Ring buffer size in bytes
  */
-void init_slip_buffer(slipBuffer_t* slip_buf, uint8_t* buf, int size);
+void init_slip_buffer(struct slipBuffer* slip_buf, uint8_t* buf, int size, struct k_poll_signal* signal);
 
-void slip_uart_putc(volatile slipBuffer_t* slip_buf, char c);
+void slip_uart_putc(struct slipBuffer* slip_buf, char c);
 
 /* slip_recv_packet: reads a packet from buf into the buffer
  * located at "p". If more than len bytes are received, the
@@ -46,7 +49,8 @@ void slip_uart_putc(volatile slipBuffer_t* slip_buf, char c);
  * Returns the number of bytes stored in the buffer.
  * Returns 0 if the buffer does not contain a full packet.
  */
-int slip_read_packet(volatile slipBuffer_t* buf, uint8_t *p, int len);
+int slip_read_packet(struct slipBuffer* slip_buf, uint8_t *p, int len);
+
 void slip_send_packet(uint8_t *p, int len, void (*send_char)(char c));
 void slip_encode(const uint8_t* p, int len, void (* send_char)(char c));
 
